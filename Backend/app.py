@@ -78,5 +78,82 @@ def connect_ssh():
     except Exception as e:
         return jsonify({"message": str(e), "status": "error"}), 401
 
+@app.route('/list-files', methods=['POST'])
+def list_files():
+    data = request.json
+    ip = data.get('ip')
+    username = data.get('username')
+    password = data.get('password')
+    path = data.get('path', '.') # Default to current directory
+    
+    if not ip or not username or not password:
+        return jsonify({"message": "Missing credentials"}), 400
+        
+    try:
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(ip, username=username, password=password, timeout=5)
+        
+        # List files with type indicator (-F)
+        # -F appends / to dir, * to executable, etc.
+        cmd = f"ls -F {path}"
+        stdin, stdout, stderr = ssh.exec_command(cmd)
+        
+        files_raw = stdout.read().decode().splitlines()
+        ssh.close()
+        
+        files = []
+        for f in files_raw:
+            f = f.strip()
+            if not f: continue
+            
+            is_dir = f.endswith('/')
+            name = f.rstrip('/*@|') # Clean up indicators
+            
+            files.append({
+                "name": name,
+                "is_dir": is_dir,
+                "path": f"{path}/{name}".replace('//', '/') if path != '.' else name
+            })
+            
+        return jsonify({"files": files})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/run-file', methods=['POST'])
+def run_file():
+    data = request.json
+    ip = data.get('ip')
+    username = data.get('username')
+    password = data.get('password')
+    path = data.get('path')
+    
+    if not ip or not username or not password or not path:
+        return jsonify({"message": "Missing credentials or path"}), 400
+        
+    try:
+        ssh = paramiko.SSHClient()
+        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        ssh.connect(ip, username=username, password=password, timeout=5)
+        
+        # Execute python file
+        # We start with basic python execution.
+        cmd = f"python {path}"
+        stdin, stdout, stderr = ssh.exec_command(cmd)
+        
+        # Read output
+        output = stdout.read().decode()
+        error = stderr.read().decode()
+        
+        ssh.close()
+        
+        return jsonify({
+            "output": output,
+            "error": error,
+            "status": "success" if not error else "warning"
+        })
+    except Exception as e:
+        return jsonify({"error": str(e), "status": "failed"}), 500
+
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
