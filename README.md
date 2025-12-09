@@ -1,4 +1,4 @@
-# Admin Panel Project
+# ASAR Admin Panel
 
 This project consists of a Flask backend and a Streamlit frontend.
 
