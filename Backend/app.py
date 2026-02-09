@@ -8,6 +8,8 @@ import tensorflow as tf
 import os
 import requests
 from threading import Lock
+import socket
+from urllib.parse import urlparse
 
 # --- Load Model ---
 MODEL_PATH = "models/mobilenet_ssd_v2_coco_quant_postprocess.tflite"
@@ -39,7 +41,7 @@ def load_model():
 # Load model on startup
 load_model()
 
-def detect_objects(frame):
+def detect_objects(frame, sock=None, target_address=None):
     global interpreter
     if not interpreter:
         return frame
@@ -119,11 +121,20 @@ def detect_objects(frame):
                 threshold = im_width * 0.15
                 
                 if box_center_x > image_center_x + threshold:
-                    print("turning right")
+                    direction = "right"
+                    print(f"Action: {direction}")
                 elif box_center_x < image_center_x - threshold:
-                    print("turning left")
+                    direction = "left"
+                    print(f"Action: {direction}")
                 else:
-                    print("moving forrward")
+                    direction = "forward"
+                    print(f"Action: {direction}")
+                
+                if sock and target_address:
+                    try:
+                        sock.sendto(direction.encode(), target_address)
+                    except Exception as e:
+                        print(f"Socket send error: {e}")
                 # -----------------------
     
     # Add count text
@@ -405,6 +416,31 @@ def process_video():
     url = request.args.get('url')
     if not url:
         return "Missing URL", 400
+
+    # Socket setup logic
+    target_ip = request.args.get('ip')
+    target_port = request.args.get('port')
+    sock = None
+    target_address = None
+
+    if not target_ip:
+        # Try to extract IP from URL
+        try:
+            parsed_url = urlparse(url)
+            if parsed_url.hostname:
+                target_ip = parsed_url.hostname
+                print(f"Extracted IP from URL: {target_ip}")
+        except Exception as e:
+            print(f"Could not extract IP from URL: {e}")
+
+    if target_ip and target_port:
+        try:
+            port = int(target_port)
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            target_address = (target_ip, port)
+            print(f"UDP Socket initialized for {target_address}")
+        except ValueError:
+            print("Invalid port number")
         
     def generate_frames():
         # captured_url needs to be a local variable that can be updated
@@ -467,7 +503,7 @@ def process_video():
                 
             # Run detection
             try:
-                frame = detect_objects(frame)
+                frame = detect_objects(frame, sock, target_address)
             except Exception as e:
                 print(f"Error during detection: {e}")
             
@@ -483,6 +519,8 @@ def process_video():
                    b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
                    
         cap.release()
+        if sock:
+            sock.close()
         print("Video capture released.")
 
     return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
