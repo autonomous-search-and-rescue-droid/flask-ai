@@ -17,8 +17,40 @@ BASE_URL = f"http://{IP_ADDRESS}:5000"
 STREAM_URL = f"http://{IP_ADDRESS}:5000/video"
 print(f"Connecting to video stream at: {STREAM_URL}")
 
-# Try to capture from URL
-cap = cv2.VideoCapture(STREAM_URL)
+# Initialize persistent session
+session = requests.Session()
+
+class VideoStream:
+    """
+    Dedicated thread for grabbing frames from the video stream.
+    This ensures the main loop always gets the *latest* frame
+    instead of processing buffered frames.
+    """
+    def __init__(self, src=0):
+        self.stream = cv2.VideoCapture(src)
+        (self.grabbed, self.frame) = self.stream.read()
+        self.stopped = False
+
+    def start(self):
+        Thread(target=self.update, args=(), daemon=True).start()
+        return self
+
+    def update(self):
+        while not self.stopped:
+            if not self.stream.isOpened():
+                continue
+            (self.grabbed, self.frame) = self.stream.read()
+
+    def read(self):
+        return self.frame
+
+    def stop(self):
+        self.stopped = True
+        self.stream.release()
+
+# Try to capture from URL using threaded stream
+# cap = cv2.VideoCapture(STREAM_URL)  # OLD: Blocking
+cap = VideoStream(STREAM_URL).start()
 
 threshold = 0.5  # Increased slightly for better accuracy
 top_k = 5
@@ -45,7 +77,8 @@ def send_command(endpoint):
         try:
             # Construct command URL (e.g. http://192.168.95.243:5000/up_side)
             url = f"{BASE_URL}{endpoint}"
-            requests.get(url, timeout=0.5)
+            # Use session for connection pooling and increased timeout
+            session.get(url, timeout=2.0)
             # print(f"Sent: {endpoint}")
         except Exception as e:
             print(f"Error sending command {endpoint}: {e}")
@@ -63,13 +96,13 @@ def print_action(action, details=""):
     
     endpoint = None
     if action == "FORWARD":
-        endpoint = "up_side"
+        endpoint = "/up_side"
     elif action == "LEFT":
-        endpoint = "left_side"
+        endpoint = "/left_side"
     elif action == "RIGHT":
-        endpoint = "right_side"
+        endpoint = "/right_side"
     elif action == "STOP":
-        endpoint = "stop"
+        endpoint = "/stop"
         
     # Only send if action changed
     if action != last_action:
@@ -278,19 +311,24 @@ def main():
 
     print("Model Loaded. Starting Video Capture...")
     
-    if not cap.isOpened():
-        print(f"Error: Could not open video source {STREAM_URL}")
-        return
+    # cap is now a VideoStream object, not cv2.VideoCapture
+    # Verification handled inside class, or we can check first frame
+    time.sleep(2.0) # Warm up
 
     while True:
         start_time = time.time()
         
-        ret, frame = cap.read()
-        if not ret:
+        # Get latest frame (non-blocking)
+        frame = cap.read()
+        
+        if frame is None:
             print("Failed to read frame from stream. Reconnecting...")
             time.sleep(1)
-            cap.release()
-            cap = cv2.VideoCapture(STREAM_URL)
+            try:
+                cap.stop()
+                cap = VideoStream(STREAM_URL).start()
+            except:
+                pass
             continue
         
         frame_height, frame_width = frame.shape[:2]
@@ -318,9 +356,13 @@ def main():
             if no_person_start_time is None:
                 no_person_start_time = time.time()
             
-            # Optional: Enable search mode
-            # search_mode() 
-            print_action("STOP", "No person detected")
+            elapsed = time.time() - no_person_start_time
+            
+            if elapsed < 1.0:
+                print_action("STOP", f"Lost detection... waiting ({elapsed:.1f}s)")
+            else:
+                # Continuous search logic: Rotate right until person found
+                print_action("RIGHT", "Searching - No person detected")
         
         # FPS display
         fps = round(1.0 / (time.time() - start_time), 1)
